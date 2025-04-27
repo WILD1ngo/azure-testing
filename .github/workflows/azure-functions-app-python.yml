@@ -1,0 +1,83 @@
+# .github/workflows/docker-publish.yml
+
+name: Manually Build and Push Docker Image to ACR
+
+# Define the trigger: Allows manual triggering from the Actions tab
+on:
+  workflow_dispatch:
+    inputs:
+      # Define an input for the branch or tag reference to build
+      git_ref:
+        description: 'Git Ref (branch, tag, or SHA) to build'
+        required: true
+        default: 'main' # Default to the main branch
+        type: string
+
+env:
+  # Use lower-case for registry/image names as per Docker standards
+  ACR_REGISTRY_NAME_LC: ${{ secrets.ACR_LOGIN_SERVER }}
+  # Define your image name. Using the repository name is common.
+  IMAGE_NAME_LC: ${{ github.repository }} # This will be like 'owner/repo-name' initially
+
+jobs:
+  build-and-push-image:
+    name: Build Docker Image and Push to ACR
+    runs-on: ubuntu-latest # Use a standard Linux runner
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Checkout the specific branch/tag/SHA provided during manual trigger
+          ref: ${{ github.event.inputs.git_ref }}
+
+      # Step to normalize the image name (convert to lowercase, extract repo name)
+      - name: Prepare image name
+        id: prep
+        run: |
+          REPO_NAME=$(echo "${{ github.repository }}" | awk -F / '{print $2}')
+          echo "image_name_lc=$(echo ${REPO_NAME} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "registry_name_lc=$(echo "${{ env.ACR_REGISTRY_NAME_LC }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          # Normalize the input ref for use as a tag (replace slashes like refs/heads/ with dashes)
+          NORMALIZED_REF=$(echo "${{ github.event.inputs.git_ref }}" | sed 's|refs/heads/||' | sed 's|/|-|g')
+          echo "image_tag=$(echo ${NORMALIZED_REF} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.prep.outputs.registry_name_lc }} # Use normalized registry name
+          username: ${{ secrets.ACR_USERNAME }}   # Service Principal App ID
+          password: ${{ secrets.ACR_PASSWORD }}   # Service Principal Client Secret
+
+      - name: Build and Push Docker Image
+        id: build-push # Give this step an ID to reference its outputs if needed
+        uses: docker/build-push-action@v5
+        with:
+          context: . # Build context is the root of the repository
+          # Optional: Specify Dockerfile location if not in root:
+          # file: ./path/to/your/Dockerfile
+          push: true # Push the image after building
+          tags: |
+            ${{ steps.prep.outputs.registry_name_lc }}/${{ steps.prep.outputs.image_name_lc }}:${{ github.sha }}
+            ${{ steps.prep.outputs.registry_name_lc }}/${{ steps.prep.outputs.image_name_lc }}:${{ steps.prep.outputs.image_tag }}
+          # Optional: Add build arguments if needed
+          # build-args: |
+          #   arg1=value1
+          #   arg2=value2
+          # Optional: Add labels
+          # labels: |
+          #   org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          #   org.opencontainers.image.revision=${{ github.sha }}
+          #   org.opencontainers.image.ref.name=${{ github.event.inputs.git_ref }}
+
+      - name: Print Image URI
+        run: |
+          echo "Image pushed:"
+          echo "${{ steps.prep.outputs.registry_name_lc }}/${{ steps.prep.outputs.image_name_lc }}:${{ github.sha }}"
+          echo "${{ steps.prep.outputs.registry_name_lc }}/${{ steps.prep.outputs.image_name_lc }}:${{ steps.prep.outputs.image_tag }}"
+
+      # Optional: Add a step to logout from ACR
+      # - name: Logout from Azure Container Registry
+      #   if: always() # Run this step even if previous steps fail
+      #   run: docker logout ${{ steps.prep.outputs.registry_name_lc }}
